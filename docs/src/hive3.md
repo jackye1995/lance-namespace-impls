@@ -28,7 +28,7 @@ The **namespace identifier** is constructed by joining namespace levels with the
 
 ### Table
 
-A **table** is represented as a [Table object](https://github.com/apache/hive/blob/branch-4.0/standalone-metastore/metastore-common/src/main/thrift/hive_metastore.thrift#L631) in HMS with `tableType` set to `EXTERNAL_TABLE`.
+A **table** is represented as a [Table object](https://github.com/apache/hive/blob/branch-4.0/standalone-metastore/metastore-common/src/main/thrift/hive_metastore.thrift#L631) in HMS with `tableType` set to `EXTERNAL_TABLE` and the table parameter `EXTERNAL=TRUE`. Both must be set, because HMS silently stores a table declared as `EXTERNAL_TABLE` without the `EXTERNAL=TRUE` parameter as a `MANAGED_TABLE`.
 
 The **table identifier** is constructed by joining catalog, database, and table name with the `$` delimiter (e.g., `catalog$database$table`).
 
@@ -38,7 +38,7 @@ The **table location** is stored in the [`location`](https://github.com/apache/h
 
 ## Lance Table Identification
 
-A table in HMS is identified as a Lance table when it meets the following criteria: the `tableType` is `EXTERNAL_TABLE`, and the `parameters` map contains a key `table_type` with value `lance` (case insensitive). The `location` in `storageDescriptor` may be declared before a Lance dataset exists; storage is checked only for `include_declared=false` listing or `check_declared=true` describe requests.
+A table in HMS is identified as a Lance table when the `parameters` map contains a key `table_type` with value `lance` (case insensitive). The `location` in `storageDescriptor` may be declared before a Lance dataset exists; storage is checked only for `include_declared=false` listing or `check_declared=true` describe requests.
 
 ## Basic Operations
 
@@ -123,7 +123,7 @@ The implementation:
 2. Verify the parent namespace exists
 3. Create an HMS Table object with `tableType=EXTERNAL_TABLE`
 4. Set the storage descriptor with the specified or default location. When location is not specified, it defaults to `{root}/{database}.db/{table}` for the default `hive` catalog (hive2-compatible), or `{root}/{catalog}/{database}.db/{table}` for other catalogs
-5. Merge request `properties` with required table parameters such as `table_type=lance` and `managed_by=storage`
+5. Merge request `properties` with required table parameters such as `table_type=lance`, `managed_by=storage`, and `EXTERNAL=TRUE`
 6. Register the table in HMS
 7. Return the declared table location, table parameters, and `managed_versioning=false`
 
@@ -182,7 +182,8 @@ The implementation:
 
 1. Parse the table identifier
 2. Retrieve the Table object and validate it is a Lance table
-3. Drop the table from HMS with `deleteData=true`, which removes both the metadata and the underlying Lance table data
+3. Drop the table from HMS with `deleteData=false`, since HMS does not delete data for external tables
+4. Delete the underlying Lance dataset at the table location as a best-effort cleanup
 
 **Error Handling:**
 

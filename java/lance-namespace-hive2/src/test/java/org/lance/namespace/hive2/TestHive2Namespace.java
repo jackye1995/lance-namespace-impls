@@ -13,14 +13,19 @@
  */
 package org.lance.namespace.hive2;
 
+import org.lance.Dataset;
+import org.lance.WriteParams;
 import org.lance.namespace.LanceNamespace;
 import org.lance.namespace.errors.LanceNamespaceException;
 import org.lance.namespace.model.CreateNamespaceRequest;
+import org.lance.namespace.model.DeclareTableRequest;
+import org.lance.namespace.model.DeregisterTableRequest;
 import org.lance.namespace.model.DescribeNamespaceRequest;
 import org.lance.namespace.model.DescribeNamespaceResponse;
 import org.lance.namespace.model.DescribeTableRequest;
 import org.lance.namespace.model.DropNamespaceRequest;
 import org.lance.namespace.model.DropNamespaceResponse;
+import org.lance.namespace.model.DropTableRequest;
 import org.lance.namespace.model.ListTablesRequest;
 import org.lance.namespace.model.ListTablesResponse;
 import org.lance.namespace.model.NamespaceExistsRequest;
@@ -29,7 +34,11 @@ import org.lance.namespace.model.TableExistsRequest;
 import com.google.common.collect.Maps;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.hadoop.hive.conf.HiveConf;
+import org.apache.hadoop.hive.metastore.api.Table;
 import org.assertj.core.util.Lists;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -38,12 +47,14 @@ import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Collections;
 import java.util.Map;
 
 import static java.nio.file.Files.createTempDirectory;
 import static java.nio.file.attribute.PosixFilePermissions.asFileAttribute;
 import static java.nio.file.attribute.PosixFilePermissions.fromString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -275,6 +286,104 @@ public class TestHive2Namespace {
     Exception error =
         assertThrows(LanceNamespaceException.class, () -> namespace.dropNamespace(dropRequest));
     assertTrue(error.getMessage().contains("Database non_existent_db doesn't exist"));
+  }
+
+  @Test
+  public void testDeclareTableIsExternalInHms() throws Exception {
+    CreateNamespaceRequest nsRequest = new CreateNamespaceRequest();
+    nsRequest.setId(Lists.list("test_db"));
+    nsRequest.setMode("Create");
+    namespace.createNamespace(nsRequest);
+
+    DeclareTableRequest declareRequest = new DeclareTableRequest();
+    declareRequest.setId(Lists.list("test_db", "ext_table"));
+    declareRequest.setLocation(tmpDirBase + "/ext_table");
+    namespace.declareTable(declareRequest);
+
+    Table hmsTable = metastore.clientPool().run(client -> client.getTable("test_db", "ext_table"));
+    assertEquals("EXTERNAL_TABLE", hmsTable.getTableType());
+    assertEquals("TRUE", hmsTable.getParameters().get("EXTERNAL"));
+  }
+
+  @Test
+  public void testDropTableDeletesData() throws Exception {
+    CreateNamespaceRequest nsRequest = new CreateNamespaceRequest();
+    nsRequest.setId(Lists.list("test_db"));
+    nsRequest.setMode("Create");
+    namespace.createNamespace(nsRequest);
+
+    String location = tmpDirBase + "/drop_data_table";
+    DeclareTableRequest declareRequest = new DeclareTableRequest();
+    declareRequest.setId(Lists.list("test_db", "drop_data_table"));
+    declareRequest.setLocation(location);
+    namespace.declareTable(declareRequest);
+
+    Schema schema =
+        new Schema(Collections.singletonList(Field.nullable("id", new ArrowType.Int(32, true))));
+    WriteParams writeParams =
+        new WriteParams.Builder().withMode(WriteParams.WriteMode.CREATE).build();
+    Dataset.create(allocator, location, schema, writeParams).close();
+    assertTrue(new File(location).exists());
+
+    DropTableRequest dropRequest = new DropTableRequest();
+    dropRequest.setId(Lists.list("test_db", "drop_data_table"));
+    namespace.dropTable(dropRequest);
+
+    TableExistsRequest existsRequest = new TableExistsRequest();
+    existsRequest.setId(Lists.list("test_db", "drop_data_table"));
+    assertThrows(LanceNamespaceException.class, () -> namespace.tableExists(existsRequest));
+    assertFalse(new File(location).exists());
+  }
+
+  @Test
+  public void testDropTableDeclaredOnly() {
+    CreateNamespaceRequest nsRequest = new CreateNamespaceRequest();
+    nsRequest.setId(Lists.list("test_db"));
+    nsRequest.setMode("Create");
+    namespace.createNamespace(nsRequest);
+
+    DeclareTableRequest declareRequest = new DeclareTableRequest();
+    declareRequest.setId(Lists.list("test_db", "declared_only_table"));
+    declareRequest.setLocation(tmpDirBase + "/declared_only_table");
+    namespace.declareTable(declareRequest);
+
+    // Dropping a declared-only table (no Lance dataset at the location) must still succeed
+    DropTableRequest dropRequest = new DropTableRequest();
+    dropRequest.setId(Lists.list("test_db", "declared_only_table"));
+    namespace.dropTable(dropRequest);
+
+    TableExistsRequest existsRequest = new TableExistsRequest();
+    existsRequest.setId(Lists.list("test_db", "declared_only_table"));
+    assertThrows(LanceNamespaceException.class, () -> namespace.tableExists(existsRequest));
+  }
+
+  @Test
+  public void testDeregisterTableKeepsData() throws Exception {
+    CreateNamespaceRequest nsRequest = new CreateNamespaceRequest();
+    nsRequest.setId(Lists.list("test_db"));
+    nsRequest.setMode("Create");
+    namespace.createNamespace(nsRequest);
+
+    String location = tmpDirBase + "/deregister_table";
+    DeclareTableRequest declareRequest = new DeclareTableRequest();
+    declareRequest.setId(Lists.list("test_db", "deregister_table"));
+    declareRequest.setLocation(location);
+    namespace.declareTable(declareRequest);
+
+    Schema schema =
+        new Schema(Collections.singletonList(Field.nullable("id", new ArrowType.Int(32, true))));
+    WriteParams writeParams =
+        new WriteParams.Builder().withMode(WriteParams.WriteMode.CREATE).build();
+    Dataset.create(allocator, location, schema, writeParams).close();
+
+    DeregisterTableRequest deregisterRequest = new DeregisterTableRequest();
+    deregisterRequest.setId(Lists.list("test_db", "deregister_table"));
+    namespace.deregisterTable(deregisterRequest);
+
+    TableExistsRequest existsRequest = new TableExistsRequest();
+    existsRequest.setId(Lists.list("test_db", "deregister_table"));
+    assertThrows(LanceNamespaceException.class, () -> namespace.tableExists(existsRequest));
+    assertTrue(new File(location).exists());
   }
 
   @Test

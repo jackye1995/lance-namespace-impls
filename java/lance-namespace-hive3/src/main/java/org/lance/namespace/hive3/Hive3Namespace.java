@@ -556,6 +556,8 @@ public class Hive3Namespace implements LanceNamespace, Closeable {
       table.setSd(sd);
 
       Map<String, String> params = Hive3Util.createLanceTableParams(properties);
+      // HMS silently rewrites the table type to MANAGED_TABLE unless this parameter is set
+      params.put("EXTERNAL", "TRUE");
       table.setParameters(params);
 
       clientPool.run(
@@ -640,11 +642,18 @@ public class Hive3Namespace implements LanceNamespace, Closeable {
       Hive3Util.validateLanceTable(hmsTable.get());
       String location = hmsTable.get().getSd().getLocation();
 
+      // HMS does not delete data for external tables, so drop metadata only and delete the
+      // Lance dataset explicitly when requested
       clientPool.run(
           client -> {
-            client.dropTable(catalog, db, tableName, deleteData, true /* ignoreUnknownTable */);
+            client.dropTable(
+                catalog, db, tableName, false /* deleteData */, true /* ignoreUnknownTable */);
             return null;
           });
+
+      if (deleteData) {
+        safeDropDataset(location);
+      }
 
       return location;
     } catch (TException | InterruptedException e) {
@@ -653,6 +662,14 @@ public class Hive3Namespace implements LanceNamespace, Closeable {
       }
       String errorMessage = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
       throw new ServiceUnavailableException("Failed to drop table: " + errorMessage);
+    }
+  }
+
+  private void safeDropDataset(String location) {
+    try {
+      Dataset.drop(location, Collections.emptyMap());
+    } catch (Exception e) {
+      LOG.warn("Failed to delete Lance dataset at {} for dropped table", location, e);
     }
   }
 
